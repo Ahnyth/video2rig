@@ -63,7 +63,6 @@ bpy.ops.object.join()
 if '--no-deform' in sys.argv:                                 # heat that reaches nothing: the guard
     for b in arm.data.bones:
         b.use_deform = False
-# a few tiny loose shells on the copy (what fur cards leave): one voxel-size cube beside the body, joined in
 print('HEAT_SCENE', len(body.data.vertices), 'vertices', flush=True)
 try:
     W, names, part, main = ns['heat_on_main'](body, arm, {}, solid=cards)
