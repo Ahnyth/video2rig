@@ -31,6 +31,8 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--frames', type=int, default=120)
     ap.add_argument('--clean', action='store_true', help='no damage: the render as it is')
+    ap.add_argument('--reframe', action='store_true', help='also re-frame it (1-3%% scale, a few px): the alignment '
+                    'on the start frame then has to find the cameras again')
     a = ap.parse_args()
     sys.path.insert(0, str(Path(a.repo).resolve()))
     sys.path.insert(0, str(HERE))
@@ -101,7 +103,8 @@ def main():
     for n in range(len(keys)):
         img = cv2.imread(str(frames_dir / f'frame_{n:04d}.png'))
         if not a.clean:
-            img = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            if a.reframe:
+                img = cv2.warpAffine(img, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             img = cv2.GaussianBlur(img, (0, 0), .7).astype(np.float32) * gain
             img = np.clip(img + rng.normal(0, 2.0, img.shape), 0, 255).astype(np.uint8)
         vw.write(img)

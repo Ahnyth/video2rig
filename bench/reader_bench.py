@@ -30,6 +30,8 @@ ap.add_argument('--reader', default='')
 ap.add_argument('--tta', type=int, default=None)
 ap.add_argument('--tag', default='')
 ap.add_argument('--cpu', action='store_true')
+ap.add_argument('--exact-cameras', action='store_true', help='the cameras as rendered (the clip was not re-framed), '
+                'not as the alignment on frame 0 found them')
 ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE')
 a = ap.parse_args()
 sys.path.insert(0, str(Path(a.repo).resolve()))
@@ -45,6 +47,16 @@ from video2rig.reader.road import fit_reading, read_clip  # noqa: E402
 pr = Project(a.project)
 cfg = pr.clip_cfg(a.clip)
 cfg.setdefault('solve', {})
+# the cameras: as the tool's alignment on frame 0 found them (kept as cameras-aligned-tool.json), or exact
+aligned, tool = pr.work(a.clip) / 'cameras-aligned.json', pr.work(a.clip) / 'cameras-aligned-tool.json'
+if not tool.exists():
+    if not aligned.exists():
+        Creature(pr, cfg).views(a.clip)
+    tool.write_text(aligned.read_text())
+recs = json.loads(tool.read_text())
+if a.exact_cameras:
+    recs = [{**r, 'scale': 1.0, 'offset': [0.0, 0.0], 'turn_deg': [0.0, 0.0, 0.0]} for r in recs]
+aligned.write_text(json.dumps(recs))
 reader = Path(a.reader) if a.reader else pr.root / 'reader' / 'reader.pt'
 if not reader.is_absolute():
     reader = pr.root / reader
@@ -94,8 +106,34 @@ m = res.get('motion')
 Xm, tm = (np.stack([kr.points(p) for p in m['params']]), np.asarray(m['times'], float)) if m else (X, times[:T])
 arms = np.array([any(w in kp[1].lower() for w in ('hand', 'forearm')) for kp in kps])
 window = (times[:T] > 1.8) & (times[:T] < 2.2)
+up = np.asarray(cr.up, float) / np.linalg.norm(cr.up)
+flat = lambda Y: Y - (Y @ up)[..., None] * up
+X0 = kr.points(cr.p0(None))
+feet = body & ((X0 @ up - cr.floor) <= .05 * cr.height)
+Xe = even(Xm, tm)
+slide = float((np.linalg.norm(np.diff(flat(Xe[:, feet]), axis=0), axis=-1) * 24.0).mean() * kpx) if feet.any() else None
+seam = loop_err = None
+
+
+def wrap_ratio(XL):
+    """A loop's wrap against its inside: the keypoints' second difference across the wrap (the frame before the last,
+    the first, the second: the last frame is the first again) over its mean inside. 1: as smooth as the rest."""
+    R = XL - flat(XL.mean(1, keepdims=True))
+    inside = np.linalg.norm(R[2:] - 2 * R[1:-1] + R[:-2], axis=-1).mean()
+    return float(np.linalg.norm(R[1] - 2 * R[0] + R[-2], axis=-1).mean() / max(inside, 1e-12))
+
+
+if m and 'loop' in m:
+    XL = np.stack([kr.points(p) for p in m['loop']['params']])[:, body]
+    i0 = int(np.argmin(np.abs(tm - res['report']['loop']['start_s'])))
+    plain = Xm[i0:i0 + len(XL)][:, body]                                    # the same window, cut as it is
+    seam = dict(loop=round(wrap_ratio(XL), 2), plain_cut=round(wrap_ratio(plain), 2))
+    j0 = int(np.argmin(np.abs(times[:T] - res['report']['loop']['start_s'])))
+    XT = X_true[j0:j0 + len(XL)][:, body]
+    loop_err = round(float(np.linalg.norm(XL[:len(XT)] - XT, axis=-1).mean() * kpx), 3)
 print(json.dumps(dict(
     clip=a.clip, reader=reader.name, tta=a.tta, set=a.set, repo=Path(a.repo).name, frames=T,
+    cameras='exact' if a.exact_cameras else 'aligned',
     seen_share=round(float(seen.mean()), 3),
     read_seen_px=[round(float(np.median(miss[seen])), 2), round(float(miss[seen].mean()), 2)],
     read_hidden_px=[round(float(np.median(miss[~seen])), 2), round(float(miss[~seen].mean()), 2)] if (~seen).any() else None,
@@ -106,4 +144,5 @@ print(json.dumps(dict(
     if window.any() and arms.any() else None,
     shake_px=[round(float(d3(even(Xm[:, body], tm)).mean() * kpx), 3),
               round(float(d3(even(X_true[:T][:, body], times[:T])).mean() * kpx), 3)],
+    foot_slide=None if slide is None else round(slide, 2), loop_seam=seam, loop_err_px=loop_err,
     read_secs=round(read_secs, 1), fit_secs=round(fit_secs, 1))), flush=True)
