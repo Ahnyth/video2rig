@@ -33,24 +33,46 @@ a = ap.parse_args()
 repo = Path(a.repo).resolve()
 sys.path.insert(0, str(repo))
 
-import re  # noqa: E402
-
 import cv2  # noqa: E402
 import torch  # noqa: E402
 
 from video2rig.common import Project  # noqa: E402
 from video2rig.creature import Creature  # noqa: E402
 from video2rig.reader import KeypointRig, keypoints, side_of  # noqa: E402
-from video2rig.reader.fit import SETTINGS, along_floor, find_loop, projector  # noqa: E402
-
-LEG = re.compile(r'(thigh|shin|foot|toe|heel|pelvis|leg)', re.I)
+from video2rig.reader.fit import SETTINGS, projector  # noqa: E402
 from video2rig.reader.road import fit_reading  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from truth import content_times, truth  # noqa: E402
+
+
+
+def along_floor(X, up):
+    """X (..., 3) with the up-down part taken out (the bench's own: every checkout is measured the same way)."""
+    up = np.asarray(up, float) / np.linalg.norm(up)
+    return X - (X @ up)[..., None] * up
+
+
+def find_loop(X, times, up, shortest=.5):
+    """(i, j) the window whose end looks most like its start (as reader/fit.py's find_loop on the game branch)."""
+    R = X - along_floor(X.mean(1, keepdims=True), up)
+    step = np.gradient(R, axis=0)
+    gap = int(np.ceil(shortest / float(np.median(np.diff(times)))))
+    best, out = np.inf, (0, len(R) - 1)
+    for i in range(len(R) - gap):
+        d = np.linalg.norm(R[i + gap:] - R[i], axis=-1).mean(1) + 4 * np.linalg.norm(step[i + gap:] - step[i],
+                                                                                     axis=-1).mean(1)
+        j = int(np.argmin(d))
+        if d[j] < best:
+            best, out = float(d[j]), (i, i + gap + j)
+    return out
+
 
 root = Path(a.project).resolve()
 clip = f'{a.clip}-{a.kind}'
 T = a.frames
 i = np.arange(T)
-times = np.round({'24': i / 24, '30-5': (i + i // 4) / 30, '25-25': (i + i // 24) / 25}[a.kind], 6)
+times = content_times(T, a.kind)
 # the project: a clip of start.png copies (the fit uses only the cameras, aligned on frame 0), the timing set
 cfg_path = root / 'creature.json'
 cfg_all = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
@@ -71,40 +93,9 @@ cr = Creature(pr, cfg)
 kps = keypoints(cr)
 rig = cr.rig
 lo, hi, p0 = cr.bounds(clip)
-rng = np.random.default_rng(a.seed)
-
-
-def truth(t):
-    """(len(t), rig.n) the known motion (--motion): every joint channel a sum of two slow waves inside its range, the
-    arms a fast strike at 2 s, the body swaying and turning a little."""
-    t = np.asarray(t, float)[:, None]
-    P = np.tile(p0, (len(t), 1))
-    for c, (j, ax) in enumerate(rig.channels):
-        k = 3 + c
-        room = max(min(hi[k] - p0[k], p0[k] - lo[k]), 0.0)
-        f = rng.uniform(.3, .9, 2) if a.motion != 'cycle' else .8 * rng.integers(1, 3, 2)
-        if a.motion == 'idle' and (j == rig.root or LEG.search(rig.names[j])):
-            rng.uniform(0, 1, 2)
-            continue
-        ph = rng.uniform(0, 2 * np.pi, 2)
-        wave = .6 * np.sin(2 * np.pi * f[0] * t + ph[0]) + .4 * np.sin(2 * np.pi * f[1] * t + ph[1])
-        P[:, k] = p0[k] + min(.15 * room, .5) * wave[:, 0]
-        if a.motion == 'walk' and 'arm' in rig.names[j].lower() and ax == 0:
-            P[:, k] += min(.5 * room, .8) * np.exp(-((t[:, 0] - 2.0) / .08) ** 2)   # a strike: 0.2 s up and back
-    s = cr.height
-    if a.motion != 'idle':
-        f0, f1 = (.4, 1.1) if a.motion == 'walk' else (.8, 1.6)
-        P[:, 0] += .05 * s * np.sin(2 * np.pi * f0 * t[:, 0])
-        P[:, 2] += .02 * s * np.sin(2 * np.pi * f1 * t[:, 0])
-    return np.clip(P, lo, hi)
-
-
-rng_motion = np.random.default_rng(a.seed)
-rng = rng_motion
-P_true = truth(times)
+P_true = truth(cr, clip, times, a.motion, a.seed)
 grid_t = np.round(np.arange(int(round(times[-1] * 120)) + 1) / 120, 6)          # 120 Hz: the truth between frames
-rng = np.random.default_rng(a.seed)
-P_fine = truth(grid_t)
+P_fine = truth(cr, clip, grid_t, a.motion, a.seed)
 kr = KeypointRig(cr, kps)
 X_true = np.stack([kr.points(p) for p in P_true])                             # (T, K, 3)
 X_fine = np.stack([kr.points(p) for p in P_fine])
@@ -185,7 +176,7 @@ if a.motion == 'cycle':
         XL, tl = np.stack([kr.points(p) for p in m['loop']['params']]), m['loop']['times']
         win = res['report']['loop']
     else:                                                                   # the same window cut from the plain fit
-        i0, j0 = find_loop(X_out[:, body], t_out, cr.up, SETTINGS['shortest_loop'])
+        i0, j0 = find_loop(X_out[:, body], t_out, cr.up)
         XL, tl = X_out[i0:j0 + 1], t_out[i0:j0 + 1] - t_out[i0]
         win = dict(start_s=round(float(t_out[i0]), 3), end_s=round(float(t_out[j0]), 3))
     R = XL[:, body] - along_floor(XL[:, body].mean(1, keepdims=True), cr.up)

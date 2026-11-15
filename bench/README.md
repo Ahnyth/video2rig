@@ -17,3 +17,27 @@ keypoints' speed against the truth by real time, px/s; also only where the readi
 truth and of the fit on an even 24 fps grid; foot_slide (the feet's speed along the floor); with `--motion cycle`
 the loop's seam (pose and speed jump). `--log` prints the fit's own lines, `--set KEY=VALUE` any reader fit setting. `heat_loose_pieces.py` checks the auto-rig's bone heat on a body with
 bone-free clumps or fur cards (issue #2).
+
+## With a trained reader: rendered clips with their truth
+
+`make_gt_clip.py` renders a known motion (`truth.py`: walk, idle, cycle) through the start frame's cameras in
+`render_start.py`'s studio, damages it a little the way a generated frame differs (re-framed, colours, softer,
+noise, mp4), and keeps its truth and which keypoints each panel shows. `reader_bench.py` reads it with a reader and
+fits it, each against the truth:
+
+```powershell
+python -m video2rig.reader.prepare bench/proj --blend bench/creature.blend --steps 9000
+python bench/make_gt_clip.py --clip gt-walk-24 --motion walk --kind 24
+python bench/reader_bench.py --clip gt-walk-24 --repo . [--reader reader/reader-context.pt] [--tta 0] [--set w_vel=8]
+```
+
+## Real readings without truth
+
+`real_ab.py <project> ...` fits every clip that has `work/<clip>/reader.npz` with several variants (branches as git
+worktrees, plus `--set` values) and prints what can be measured without ground truth: the miss on sure readings,
+shake, the feet's slide where they stand, a loop's seam.
+
+## Unity
+
+`unity/`: the measurement behind docs/GAME.md (a throwaway Unity project in batch mode, `Video2RigMeasure.cs`, Blender's
+own bone places by `blender_sample.py`, `compare.py`).
